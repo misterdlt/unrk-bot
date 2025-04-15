@@ -29,6 +29,7 @@ try {
 function saveSoundMappings() {
     try {
         writeFileSync('soundMappings.json', JSON.stringify(soundMappings, null, 2));
+        log.debug('Sound mappings saved: ' + JSON.stringify(soundMappings, null, 2));
         return true;
     } catch (error) {
         log.error('Error saving sound mappings:', error);
@@ -81,6 +82,12 @@ client.once('ready', async () => {
     log.info('Bot is ready and connected to Discord!');
     log.info(`Bot is in ${client.guilds.cache.size} servers`);
 
+    // Create sounds directory if it doesn't exist
+    if (!existsSync('sounds')) {
+        require('fs').mkdirSync('sounds');
+        log.info('Created sounds directory');
+    }
+
     // Register slash commands
     const commands = [
         new SlashCommandBuilder()
@@ -131,9 +138,14 @@ client.once('ready', async () => {
                     .setName('listsounds')
                     .setDescription('List all available sounds')
             )
+            .addSubcommand(subcommand =>
+                subcommand
+                    .setName('debug')
+                    .setDescription('Show current sound mappings for debugging')
+            )
     ].map(command => command.toJSON());
 
-    const rest = new REST().setToken(process.env.DISCORD_TOKEN);
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
     try {
         log.info('Started refreshing application (/) commands.');
@@ -184,23 +196,32 @@ client.on('interactionCreate', async interaction => {
         else if (subcommand === 'addsound') {
             const sound = interaction.options.getAttachment('sound');
             const name = interaction.options.getString('name');
+            const fileName = `${name}.mp3`;
+            const filePath = join(__dirname, 'sounds', fileName);
 
             if (!sound.name.endsWith('.mp3')) {
                 await interaction.reply({ content: 'Please upload an MP3 file.', ephemeral: true });
                 return;
             }
 
+            // Check if file already exists
+            if (existsSync(filePath)) {
+                await interaction.reply({ content: `A sound named '${name}' already exists. Please choose a different name.`, ephemeral: true });
+                return;
+            }
+
             try {
                 // Download and save the sound
+                await interaction.deferReply({ ephemeral: true });
                 const response = await fetch(sound.url);
                 const buffer = await response.arrayBuffer();
-                writeFileSync(join(__dirname, 'sounds', `${name}.mp3`), Buffer.from(buffer));
+                writeFileSync(filePath, Buffer.from(buffer));
                 
-                await interaction.reply({ content: `Sound '${name}' added successfully!`, ephemeral: true });
-                log.info(`New sound added: ${name}.mp3`);
+                await interaction.editReply({ content: `Sound '${name}' added successfully!`, ephemeral: true });
+                log.info(`New sound added: ${fileName}`);
             } catch (error) {
                 log.error('Error adding sound:', error);
-                await interaction.reply({ content: 'Error adding sound. Please try again.', ephemeral: true });
+                await interaction.editReply({ content: 'Error adding sound. Please try again.', ephemeral: true });
             }
         }
         else if (subcommand === 'setsound') {
@@ -215,12 +236,14 @@ client.on('interactionCreate', async interaction => {
 
             if (type === 'channel') {
                 soundMappings.channelSounds[interaction.channelId] = sound;
+                log.debug(`Set channel ${interaction.channelId} sound to ${sound}`);
             } else if (type === 'user') {
                 soundMappings.userSounds[interaction.user.id] = sound;
+                log.debug(`Set user ${interaction.user.id} sound to ${sound}`);
             }
 
             if (saveSoundMappings()) {
-                await interaction.reply({ content: `Sound set successfully for ${type}!`, ephemeral: true });
+                await interaction.reply({ content: `Sound set successfully for ${type}! Using sound: ${sound}`, ephemeral: true });
                 log.info(`Sound ${sound} set for ${type} ${type === 'channel' ? interaction.channelId : interaction.user.id}`);
             } else {
                 await interaction.reply({ content: 'Error saving sound mapping. Please try again.', ephemeral: true });
@@ -237,20 +260,37 @@ client.on('interactionCreate', async interaction => {
                 });
             }
         }
+        else if (subcommand === 'debug') {
+            // Debug command to show current sound mappings
+            const formattedMappings = JSON.stringify(soundMappings, null, 2);
+            await interaction.reply({ 
+                content: `Current sound mappings:\n\`\`\`json\n${formattedMappings}\n\`\`\``,
+                ephemeral: true 
+            });
+            log.info('Displayed sound mappings for debugging');
+        }
     }
 });
 
 // Function to get the appropriate sound for a user/channel
 function getSoundForUser(userId, channelId) {
+    // Debug logs
+    log.debug(`Getting sound for user ${userId} in channel ${channelId}`);
+    log.debug(`User sounds: ${JSON.stringify(soundMappings.userSounds)}`);
+    log.debug(`Channel sounds: ${JSON.stringify(soundMappings.channelSounds)}`);
+    
     // Check user-specific sound first
     if (soundMappings.userSounds[userId]) {
+        log.debug(`Found user sound: ${soundMappings.userSounds[userId]}`);
         return soundMappings.userSounds[userId];
     }
     // Then check channel-specific sound
     if (soundMappings.channelSounds[channelId]) {
+        log.debug(`Found channel sound: ${soundMappings.channelSounds[channelId]}`);
         return soundMappings.channelSounds[channelId];
     }
     // Finally, use default sound
+    log.debug(`Using default sound: ${soundMappings.defaultSound}`);
     return soundMappings.defaultSound;
 }
 

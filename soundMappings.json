@@ -1,5 +1,8 @@
 {
-    "channelSounds": {},
-    "userSounds": {},
-    "defaultSound": "alpha.mp3"
-} 
+  "channelSounds": {
+    "760915775493767198": "what the dog.mp3",
+    "674823569804623892": "what the dog.mp3"
+  },
+  "userSounds": {},
+  "defaultSound": "alpha.mp3"
+}
