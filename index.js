@@ -20,8 +20,7 @@ try {
     log.error('Error loading sound mappings:', error);
     soundMappings = {
         channelSounds: {},
-        userSounds: {},
-        defaultSound: "alpha.mp3"
+        userSounds: {}
     };
 }
 
@@ -45,6 +44,14 @@ function getAvailableSounds() {
         log.error('Error reading sounds directory:', error);
         return [];
     }
+}
+
+// Function to get a random sound
+function getRandomSound() {
+    const sounds = getAvailableSounds();
+    if (sounds.length === 0) return null;
+    const randomIndex = Math.floor(Math.random() * sounds.length);
+    return sounds[randomIndex];
 }
 
 // Create a new client instance
@@ -112,6 +119,11 @@ client.once('ready', async () => {
                             .setDescription('Name for the sound (without .mp3)')
                             .setRequired(true)
                     )
+            )
+            .addSubcommand(subcommand =>
+                subcommand
+                    .setName('random')
+                    .setDescription('Play a random sound in your current voice channel')
             )
             .addSubcommand(subcommand =>
                 subcommand
@@ -224,6 +236,100 @@ client.on('interactionCreate', async interaction => {
                 await interaction.editReply({ content: 'Error adding sound. Please try again.', ephemeral: true });
             }
         }
+        else if (subcommand === 'random') {
+            const guildId = interaction.guildId;
+            let connection = activeConnections.get(guildId);
+            
+            // Check if the user is in a voice channel
+            const member = interaction.member;
+            if (!member.voice.channel) {
+                await interaction.reply({ content: 'You need to be in a voice channel to use this command.', ephemeral: true });
+                return;
+            }
+            
+            // If no active connection, join the user's voice channel
+            if (!connection) {
+                const channel = member.voice.channel;
+                log.debug(`Attempting to join channel: ${channel.name} (${channel.id})`);
+                
+                try {
+                    // Create a voice connection
+                    connection = joinVoiceChannel({
+                        channelId: channel.id,
+                        guildId: channel.guild.id,
+                        adapterCreator: channel.guild.voiceAdapterCreator,
+                    });
+                    
+                    // Store the connection
+                    activeConnections.set(guildId, connection);
+                    
+                    // Wait for the connection to be ready
+                    await entersState(connection, VoiceConnectionStatus.Ready, 5000);
+                    log.info('Voice connection established successfully');
+                } catch (error) {
+                    log.error('Error joining voice channel:', error);
+                    await interaction.reply({ content: 'Failed to join voice channel. Please try again.', ephemeral: true });
+                    return;
+                }
+            }
+
+            try {
+                await interaction.deferReply({ ephemeral: true });
+                log.info('Playing a random sound in the current voice channel');
+                const soundFile = getRandomSound();
+                if (soundFile) {
+                    const filePath = join(__dirname, 'sounds', soundFile);
+                    log.debug(`Using sound file: ${soundFile}`);
+                    log.debug(`Checking audio file at: ${filePath}`);
+                    
+                    // Verify the file exists
+                    if (!existsSync(filePath)) {
+                        throw new Error(`Audio file not found at ${filePath}`);
+                    }
+                    
+                    log.debug('Audio file exists, creating resource...');
+                    
+                    // Create an audio resource from the MP3 file
+                    const resource = createAudioResource(createReadStream(filePath), {
+                        inlineVolume: true
+                    });
+                    
+                    log.debug('Audio resource created successfully');
+                    
+                    // Set volume to maximum
+                    resource.volume.setVolume(1.0);
+                    log.debug('Volume set to maximum');
+                    
+                    // Add a small delay to ensure connection is fully established
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
+                    // Subscribe the connection to the player first
+                    connection.subscribe(player);
+                    log.debug('Connection subscribed to player');
+                    
+                    // Then play the audio
+                    player.play(resource);
+                    log.info('Audio playback started');
+                    
+                    await interaction.editReply({ content: `Playing random sound: ${soundFile}`, ephemeral: true });
+                    
+                    // Handle when the audio finishes playing
+                    player.once('stateChange', (oldState, newState) => {
+                        if (newState.status === 'idle') {
+                            log.info('Audio finished playing, disconnecting...');
+                            connection.destroy();
+                            activeConnections.delete(guildId);
+                        }
+                    });
+                    
+                } else {
+                    await interaction.editReply({ content: 'No sounds available to play.', ephemeral: true });
+                }
+            } catch (error) {
+                log.error('Error playing random sound:', error);
+                await interaction.editReply({ content: 'Error playing random sound. Please try again later.', ephemeral: true });
+            }
+        }
         else if (subcommand === 'setsound') {
             const type = interaction.options.getString('type');
             const sound = interaction.options.getString('sound');
@@ -289,9 +395,17 @@ function getSoundForUser(userId, channelId) {
         log.debug(`Found channel sound: ${soundMappings.channelSounds[channelId]}`);
         return soundMappings.channelSounds[channelId];
     }
-    // Finally, use default sound
-    log.debug(`Using default sound: ${soundMappings.defaultSound}`);
-    return soundMappings.defaultSound;
+    
+    // No specific sound found, use a random sound
+    const randomSound = getRandomSound();
+    if (randomSound) {
+        log.debug(`Using random sound: ${randomSound}`);
+        return randomSound;
+    }
+    
+    // Fallback if no sounds are available
+    log.debug(`No sounds available, cannot play anything`);
+    return null;
 }
 
 // Listen for voice state updates
@@ -325,6 +439,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 try {
                     // Get the appropriate sound for this user/channel
                     const soundFile = getSoundForUser(newState.member.id, channel.id);
+                    
+                    // If no sound is available, disconnect and return
+                    if (!soundFile) {
+                        log.warn('No sound available to play, disconnecting...');
+                        connection.destroy();
+                        activeConnections.delete(guildId);
+                        return;
+                    }
+                    
                     const filePath = join(__dirname, 'sounds', soundFile);
                     
                     log.debug(`Using sound file: ${soundFile}`);
